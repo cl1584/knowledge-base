@@ -15,11 +15,8 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
 # 复制代码
 COPY . .
 
-# 数据目录
-RUN mkdir -p /app/data/sqlite /app/data/chroma /app/logs \
-    && useradd -m -u 1000 appuser \
-    && chown -R appuser:appuser /app
-USER appuser
+# 数据目录（容器内由挂载卷填充，无需 mkdir；保留 root 避免宿主卷权限问题）
+# 单用户单容器场景下 root 无安全风险；如需 non-root 必须确保宿主卷预 chown 1000:1000
 
 EXPOSE 8000
 
