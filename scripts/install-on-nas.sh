@@ -2,44 +2,53 @@
 # ==============================================================
 # 个人 AI 知识库 - NAS 一键安装脚本
 # 适用：飞牛 fnOS / Debian / Ubuntu / 其他 Linux NAS
-# 作用：拉后端镜像 + 起容器 + 配 .env + 配反代 + 配 DDNS 提示
+#
+# 用法：
+#   sudo bash install-on-nas.sh
+#   sudo KB_IMAGE=ghcr.io/你的用户名/knowledge-base-backend:latest bash install-on-nas.sh
+#
+# 完成后：**在客户端里**完成所有配置（API key、登录账号等）
 # ==============================================================
 set -euo pipefail
 
-# ---------- 配置 ----------
+# ---------- 默认配置（用环境变量覆盖）----------
 APP_NAME="kb-backend"
-IMAGE="${KB_IMAGE:-ghcr.io/lang-1234/knowledge-base-backend:latest}"  # ← 改成你的
+IMAGE="${KB_IMAGE:-ghcr.io/cl1584/knowledge-base-backend:latest}"
 DATA_DIR="${KB_DATA_DIR:-$HOME/kb-data}"
 PORT="${KB_PORT:-8000}"
-DOMAIN="${KB_DOMAIN:-}"    # 可选：留空则只开 HTTP
-EMAIL="${KB_EMAIL:-}"      # 申请 Let's Encrypt 用
+DOMAIN="${KB_DOMAIN:-}"    # 留空则只开 HTTP，不配 HTTPS
+EMAIL="${KB_EMAIL:-}"      # 配 HTTPS 时需要
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[✓]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 err()   { echo -e "${RED}[✗]${NC} $*"; exit 1; }
+title() { echo -e "\n${BOLD}${CYAN}== $* ==${NC}"; }
 
 # ---------- 前置检查 ----------
+title "检查环境"
 [ "$(id -u)" -ne 0 ] && err "需要 root 权限，请用 sudo 或 root 用户运行"
 command -v docker >/dev/null || err "Docker 未安装。请先在应用中心装 Docker。"
+info "Docker OK"
 
 # ---------- 准备数据目录 ----------
-info "创建数据目录：$DATA_DIR"
-mkdir -p "$DATA_DIR"/{sqlite,chroma,logs,ssl,www}
+title "准备数据目录"
+mkdir -p "$DATA_DIR"/{sqlite,chroma,logs,backups}
+info "数据目录：$DATA_DIR"
 
-# ---------- 生成 JWT 密钥（首次） ----------
+# ---------- 生成 .env（自动，不卡 nano）----------
 ENV_FILE="$DATA_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  info "生成 .env（首次安装）"
+  info "生成 .env（API key 留空——稍后在客户端里填）"
   JWT_SECRET=$(openssl rand -hex 32)
   cat > "$ENV_FILE" <<EOF
 # 个人 AI 知识库 - 配置文件
-# ⚠️ 不要提交到 Git！本文件含敏感信息
+# ⚠️ 含敏感信息，禁止 commit
 
-# JWT 签名密钥（64 字符）
+# JWT 签名密钥（自动生成）
 JWT_SECRET=$JWT_SECRET
 
-# DeepSeek API（登录后到设置页填更安全，这里只是兜底）
+# DeepSeek（留空——客户端设置页填）
 DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
@@ -53,30 +62,27 @@ EMBEDDING_MODEL=text-embedding-v3
 CHROMA_PATH=/app/data/chroma
 SQLITE_PATH=/app/data/sqlite/kb.db
 
-# 日志级别
 LOG_LEVEL=INFO
 EOF
-  warn "请编辑 $ENV_FILE 填入 API key"
-  read -p "现在编辑吗？[y/N] " edit
-  if [[ "$edit" =~ ^[Yy]$ ]]; then
-    ${EDITOR:-nano} "$ENV_FILE"
-  fi
+  chmod 600 "$ENV_FILE"
+  info ".env 已生成（$ENV_FILE）"
 else
-  info ".env 已存在，跳过生成"
+  info ".env 已存在，跳过"
 fi
 
 # ---------- 拉镜像 ----------
-info "拉取后端镜像：$IMAGE"
-docker pull "$IMAGE" || err "拉镜像失败，请检查网络 / 镜像地址"
+title "拉取后端镜像"
+echo "  镜像：$IMAGE"
+docker pull "$IMAGE" || err "拉镜像失败"
 
 # ---------- 停旧容器 ----------
 if docker ps -a --format '{{.Names}}' | grep -qx "$APP_NAME"; then
-  warn "发现旧容器，先停掉"
+  warn "停掉旧容器 $APP_NAME"
   docker rm -f "$APP_NAME" >/dev/null
 fi
 
 # ---------- 起容器 ----------
-info "启动后端容器"
+title "启动后端"
 docker run -d \
   --name "$APP_NAME" \
   --restart unless-stopped \
@@ -90,75 +96,93 @@ docker run -d \
   --health-interval 30s \
   --health-timeout 10s \
   --health-retries 3 \
-  "$IMAGE"
+  "$IMAGE" >/dev/null
+info "容器已启动"
 
 # ---------- 等就绪 ----------
-info "等待健康检查..."
-for i in {1..30}; do
+title "等待健康检查"
+for i in $(seq 1 30); do
   sleep 2
-  if docker inspect --format='{{.State.Health.Status}}' "$APP_NAME" 2>/dev/null | grep -q healthy; then
-    info "后端启动成功！"
-    break
-  fi
-  if [ "$i" -eq 30 ]; then
-    err "30 秒内未就绪，请 docker logs $APP_NAME 查看"
-  fi
+  STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$APP_NAME" 2>/dev/null || echo "starting")
+  [ "$STATUS" = "healthy" ] && { info "后端就绪（${i}x2s）"; break; }
+  [ "$i" -eq 30 ] && err "30 秒内未就绪，docker logs $APP_NAME"
 done
 
 # ---------- 防火墙 ----------
 if command -v ufw >/dev/null; then
-  warn "检测到 ufw，开放端口 $PORT"
   ufw allow "$PORT/tcp" 2>/dev/null || true
+  info "ufw 已放行 $PORT"
 fi
 
-# ---------- 反代 + HTTPS（可选）----------
+# ---------- 可选：Caddy HTTPS ----------
 if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
-  info "配置 Caddy 反代 + 自动 HTTPS（$DOMAIN）"
+  title "配置 HTTPS（$DOMAIN）"
   if ! command -v caddy >/dev/null; then
-    warn "未检测到 caddy，尝试安装..."
-    apt-get update -qq && apt-get install -y -qq caddy 2>/dev/null || \
-      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' 2>/dev/null | apt-key add - 2>/dev/null
+    warn "安装 caddy..."
+    apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq caddy 2>/dev/null || \
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' 2>/dev/null | apt-key add - 2>/dev/null || true
   fi
   cat > /etc/caddy/Caddyfile <<EOF
 $DOMAIN {
     encode gzip
-    reverse_proxy 127.0.0.1:$PORT
-    # SSE 流式响应：禁用缓存
     reverse_proxy 127.0.0.1:$PORT {
         flush_interval -1
     }
 }
 EOF
-  systemctl reload caddy 2>/dev/null && info "Caddy 已重载" || warn "Caddy 重载失败，请手动 systemctl reload caddy"
+  systemctl reload caddy 2>/dev/null && info "Caddy 已重载" || warn "请手动: systemctl reload caddy"
 fi
 
 # ---------- 备份 cron ----------
 CRON_FILE="/etc/cron.d/kb-backup"
 if [ ! -f "$CRON_FILE" ]; then
-  info "安装每日自动备份（凌晨 3 点）"
+  title "配置每日自动备份"
   cat > "$CRON_FILE" <<EOF
-# 每日 3 点备份 kb-data 到 kb-data/backups
+# 每日 3 点备份 kb-data
 0 3 * * * root tar -czf $DATA_DIR/backups/kb-\$(date +\%Y\%m\%d).tar.gz -C $DATA_DIR sqlite chroma 2>/dev/null && find $DATA_DIR/backups -mtime +30 -delete
 EOF
-  mkdir -p "$DATA_DIR/backups"
-  info "备份已配置"
+  info "每日 3 点自动备份"
 fi
 
 # ---------- 完成 ----------
-LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "NAS-IP")
-echo
-echo "=========================================="
-info "🎉 部署完成！"
-echo "  本地访问：http://$LOCAL_IP:$PORT"
-[ -n "$DOMAIN" ] && echo "  公网访问：https://$DOMAIN"
-echo "  健康检查：http://$LOCAL_IP:$PORT/api/health"
-echo
-echo "  客户端设置里 API 地址填："
-[ -n "$DOMAIN" ] && echo "    https://$DOMAIN" || echo "    http://$LOCAL_IP:$PORT"
-echo
-echo "  常用命令："
-echo "    docker logs -f $APP_NAME      # 看日志"
-echo "    docker restart $APP_NAME      # 重启"
-echo "    docker stop $APP_NAME         # 停止"
-echo "    bash $0                       # 重新跑本脚本（更新用）"
-echo "=========================================="
+LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$LOCAL_IP" ] && LOCAL_IP="NAS-IP"
+
+API_URL=$([ -n "$DOMAIN" ] && echo "https://$DOMAIN" || echo "http://$LOCAL_IP:$PORT")
+
+cat <<EOF
+
+${BOLD}${GREEN}========================================${NC}
+${BOLD}${GREEN}  🎉 部署完成！${NC}
+${BOLD}${GREEN}========================================${NC}
+
+${BOLD}1. 在电脑上装客户端${NC}
+   - 打开 GitHub 仓库：https://github.com/cl1584/knowledge-base/releases
+   - 下载最新 ${BOLD}知识库_0.x.x_x64-setup.exe${NC}（1.7 MB）
+   - 双击安装
+
+${BOLD}2. 启动客户端 + 注册账号${NC}
+   - 打开「知识库」
+   - 登录页点「注册」→ 填邮箱密码
+   - 登录成功
+
+${BOLD}3. 在客户端里配置 API 地址${NC}
+   - 右上角 ⚙️ → 「设置」
+   - API 地址填：${CYAN}${API_URL}${NC}
+   - 保存
+
+${BOLD}4. 配置 AI 模型（可选，但需要它才能对话）${NC}
+   - 还在设置页
+   - 选「DeepSeek」（或其他）
+   - 填你的 API key → 保存
+   - 立即可用，${BOLD}不需要回到 NAS 改任何东西${NC}
+
+${BOLD}其他：${NC}
+   - 健康检查：${API_URL}/api/health
+   - NAS 端查日志：docker logs -f $APP_NAME
+   - 重启后端：   docker restart $APP_NAME
+   - 升级：       重新跑本脚本（自动停旧起新）
+
+${BOLD}NAS 已就绪，全部操作都在客户端里完成 ✨${NC}
+
+EOF
