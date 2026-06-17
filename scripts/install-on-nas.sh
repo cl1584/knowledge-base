@@ -83,9 +83,13 @@ fi
 
 # ---------- 起容器 ----------
 title "启动后端"
+# ⚠️ 用 on-failure:5 替代 unless-stopped：
+#   - 容器连续崩 5 次后停止自动重启（避免 fast-fail 循环浪费 CPU）
+#   - 调试阶段你看到容器 exited 是干净的信号，不会一直被 docker 自动拉起
+#   - 修复 bug 后手动 docker start $APP_NAME 即可恢复
 docker run -d \
   --name "$APP_NAME" \
-  --restart unless-stopped \
+  --restart on-failure:5 \
   -p "${PORT}:8000" \
   -v "$DATA_DIR/sqlite":/app/data/sqlite \
   -v "$DATA_DIR/chroma":/app/data/chroma \
@@ -97,7 +101,7 @@ docker run -d \
   --health-timeout 10s \
   --health-retries 3 \
   "$IMAGE" >/dev/null
-info "容器已启动"
+info "容器已启动（自动重启最多 5 次后停止）"
 
 # ---------- 等就绪 ----------
 title "等待健康检查"
@@ -105,6 +109,11 @@ for i in $(seq 1 30); do
   sleep 2
   STATUS=$(docker inspect --format='{{.State.Health.Status}}' "$APP_NAME" 2>/dev/null || echo "starting")
   [ "$STATUS" = "healthy" ] && { info "后端就绪（${i}x2s）"; break; }
+  # 容器如果已 exited（说明崩了），立刻跳出而不是傻等 30s
+  RUNNING=$(docker inspect --format='{{.State.Running}}' "$APP_NAME" 2>/dev/null || echo "false")
+  if [ "$RUNNING" != "true" ]; then
+    err "容器已退出，请运行：docker logs $APP_NAME"
+  fi
   [ "$i" -eq 30 ] && err "30 秒内未就绪，docker logs $APP_NAME"
 done
 
@@ -180,8 +189,11 @@ ${BOLD}4. 配置 AI 模型（可选，但需要它才能对话）${NC}
 ${BOLD}其他：${NC}
    - 健康检查：${API_URL}/api/health
    - NAS 端查日志：docker logs -f $APP_NAME
+   - 查最近 30 行：docker logs --tail 30 $APP_NAME
    - 重启后端：   docker restart $APP_NAME
-   - 升级：       重新跑本脚本（自动停旧起新）
+   - 重新拉镜像： sudo bash install-on-nas.sh（脚本会自停旧起新）
+   - 调试技巧：  容器退出后 \`docker start $APP_NAME\` 不会自动重启（因为 on-failure:5 限 5 次）
+                想改回无限重启：\${NC}docker update --restart unless-stopped $APP_NAME\${BOLD}
 
 ${BOLD}NAS 已就绪，全部操作都在客户端里完成 ✨${NC}
 
