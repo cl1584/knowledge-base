@@ -1,0 +1,75 @@
+# 依赖
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# 构建产物
+dist/
+build/
+*.tsbuildinfo
+.vuepress/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock
+src-tauri/WixTools/
+
+# 数据
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# ChromaDB
+chroma/
+*.chroma
+
+# 环境变量（包含敏感信息，禁止提交）
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# 日志
+*.log
+logs/
+server.log
+server.pid
+
+# 缓存
+.cache/
+.parcel-cache/
+.eslintcache
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 打包
+*.tar.gz
+*.zip
+*.msi
+*.exe
+*.dmg
+*.deb
+*.AppImage
+
+# 测试
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/

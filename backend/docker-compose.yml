@@ -1,0 +1,21 @@
+# Docker Compose 部署（飞牛 NAS / 任何 Linux 服务器）
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    image: kb-backend:latest
+    container_name: kb-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data         # SQLite + ChromaDB 持久化
+      - ./.env:/app/.env:ro      # 配置文件
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
