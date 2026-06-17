@@ -1,15 +1,45 @@
 """应用配置"""
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
 from pathlib import Path
+import json
+
+
+def _parse_cors_origins(v):
+    """
+    支持三种来源：
+    1. list（python 代码里直接写）
+    2. JSON 字符串（.env 里写 CORS_ORIGINS=["a","b"]）
+    3. 逗号分隔（.env 里写 CORS_ORIGINS=https://a.com,https://b.com）
+    """
+    if isinstance(v, list):
+        return v
+    if not isinstance(v, str):
+        return []
+    s = v.strip()
+    if not s:
+        return []
+    if s.startswith("["):
+        # JSON 数组
+        try:
+            parsed = json.loads(s)
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            return []
+    # 逗号分隔
+    return [x.strip() for x in s.split(",") if x.strip()]
 
 
 class Settings(BaseSettings):
     """从 .env 文件和环境变量加载配置"""
 
+    # ⚠️ extra='ignore' 允许 .env 里塞任何调试用的变量（LOG_LEVEL / PYTHONUNBUFFERED / TZ 等）
+    # pydantic 2 默认 forbid 会让容器内常见变量（LOG_LEVEL=INFO）启动失败
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # 基础
@@ -47,12 +77,22 @@ class Settings(BaseSettings):
     # CORS
     # 生产环境必须填具体域名（例：["https://kb.yourdomain.com"]）
     # "*" 仅在 allow_credentials=false 时合法，本项目用 cookie 鉴权时会冲突
-    cors_origins: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:1420",
-        "http://localhost:1420",
-        "tauri://localhost",
-    ]
+    # 环境变量 CORS_ORIGINS 可以覆盖：
+    #   - JSON 数组：CORS_ORIGINS=["https://a.com","https://b.com"]
+    #   - 逗号分隔：CORS_ORIGINS=https://a.com,https://b.com
+    cors_origins: list[str] = Field(
+        default=[
+            "http://localhost:5173",
+            "http://127.0.0.1:1420",
+            "http://localhost:1420",
+            "tauri://localhost",
+        ],
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _v_cors(cls, v):
+        return _parse_cors_origins(v)
 
 
 settings = Settings()
